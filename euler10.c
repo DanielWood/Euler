@@ -11,23 +11,26 @@ int main(int argc, char *argv[])
     {
       fprintf(stderr, "Usage:\n\t%s <N-primes> "
 	              "[<multi=1.2f> <outfile>]\n"
-	              "\tA negative N will be used (absolute) as the limit of the sieve.\n", argv[0]);
+	              "\tA negative N will be used as limit."
+	              "\n\n", argv[0]);
       return -1;
     }
 
-  // i = bit counter, j = byte, k = bit offset, l = multiples of i
-  int i, j, k, l;
-  int max;
-  int n, nbytes;
-  const float _1_bits = 1.f / 8.f;
+  int32_t i, j, k;    // Iterators
+  int32_t max;        // argv[1]
+  uint32_t n, sqrtn;  // Sieve limit / cached sqrt(n)
+  uint32_t nwords;    // Size of buffer (in words)
   FILE *outfile = stdout;
+
+  // 1 over 32
+  const float _1_bits = 1.f / 32.f;
 
   // Safety multiplier on prime estimate
   double multi = 1.2f;
   if (argc > 2)
     {
       multi = fabs(strtod(argv[2], NULL));
-      if (multi < 1.e-16)
+      if (multi == .0f)
 	{
 	  fprintf(stderr, "Invalid float value: \"%s\"\n", argv[2]);
 	  return -1;
@@ -36,14 +39,20 @@ int main(int argc, char *argv[])
 
   // Estimate n-th prime from argv[1]
   max = strtol(argv[1], NULL, 0);
-
-  if (max < 0)
+  if (max > 3)
+    n = (int)((max * (logf(max) + logf(logf(max - 1)))) * multi);
+  else
+  if (max != 0)
     {
-      printf("Detected negative max, using as limit instead\n");
       n = max = abs(max);
     }
   else
-    n = (int)((max * (logf(max) + logf(logf(max - 1)))) * multi); 
+    {
+      fprintf(stderr, "N cannot be 0\n");
+      return -1;
+    }
+
+  sqrtn = ceilf(sqrt(n));
   
   // Open output file
   if (argc > 3)
@@ -53,62 +62,75 @@ int main(int argc, char *argv[])
 	return -1;
       }
   
-  // Number of bytes needed to hold n-bits
-  nbytes = ceilf((float)n * _1_bits);
-  printf("n:\t%d\nnbytes:\t%d\n", n, nbytes);
+  // Number of words needed to store N-bits
+  nwords = ceilf((float)n * _1_bits);
 
-  // Sieve buffers
-  uint8_t nbuf[nbytes];    // Bit-array for sieve
-  uint32_t primes[max];    // Integer array to store primes
+  // Format memory
+  char unit[] = "BKMG";
+  for (i = 0; unit[i] != '\0'; i++)
+    if (nwords * 4 <= pow(1024, i + 1))
+      break;
+  
+  // Memory info
+  fprintf(outfile, "Sieve limit at: %d\n"
+	           "Size of buffer: %.1f%c\n",
+	           n, (nwords * 4) / pow(1024, i), unit[i]);
+
+  // Buffers
+  uint32_t nbuf[nwords];   // Bit-array for sieve
+  uint32_t primes[max+1];  // Integer array to store primes
+  uint32_t *p;             // Prime pointer (for faster access?)
 
   // Fill buffer with set bits
-  for (j = 0; j < nbytes; j++)
-    nbuf[j] = 0xFF;
+  for (j = 0; j < nwords; j++)
+    nbuf[j] = 0xFFFFFFFF;
 
-  // Sieve
-  for (i = 1; i < n; i++)              // i = bit (starts at 2)
+  // Cross out the twos
+  for (i = 3; i < n; i += 2)
     {
-      j = floor((float)i * _1_bits);   // j = target byte
-      k = i % 8;                       // k = bit offset from j
-
+      j = floor((float)i * _1_bits);
+      nbuf[j] &= ~(1 << i % 32);
+    }
+  
+  // Cross out the rest
+  for (i = 2; i < sqrtn; i += 2)       // i = bit (starts at 3)
+    {
+      j = floor((float)i * _1_bits);   // j = current byte
+      
       // Check bit
-      if ((nbuf[j] >> k) & 1)
+      if ((nbuf[j] >> i % 32) & 1)
 	{
 	  // Unset all multiples
-	  l = i + (i + 1);             // l = multiples of i
-	  for (; l < n; l += i + 1)
+	  k = i + (i + 1);             // k = multiples of i
+	  for (; k < n; k += i + 1)
 	    {
-	      j = floor((float)l * _1_bits);
-	      k = l % 8;
+	      j = floor((float)k * _1_bits);
 
-	      // Unset bit l
-	      nbuf[j] &= ~(1 << k);
+	      // Unset bit
+	      nbuf[j] &= ~(1 << k % 32);
 	    }
 	}
     }
 
-  // Filter and feed primes into their own array
-  for (i = j = l = 0; i < n; i++)
+  // Filter primes into their own array
+  for (i = j = k = 0; i < n; i++)
     {
       j = floor((float)i * _1_bits);
-      k = i % 8;
-      if ((nbuf[j] >> k) & 1)
+      if ((nbuf[j] >> i % 32) & 1)
 	{
-	  primes[l++] = i + 1;
+	  primes[k++] = i + 1;
 
-	  if (l >= max)
+	  if (k >= max)
 	    break;
 	}
     }
 
   // Output primes
   uint64_t sum = 0;
-  for (i = 0; i < l; i++, sum += primes[i])
-    {
-      fprintf(outfile, "Prime #%d\t=\t%u\n", i + 1, primes[i]);
-    }
-  
-  fprintf(outfile, "Sum of primes: %llu\n", sum-1);
+  for (p = primes, i = 0; i < k; sum += *p, p++, i++)
+    fprintf(outfile, "%u\n", *p);
+
+  fprintf(outfile, "Sum: %llu\n", sum);
   
   // Clean up outfile
   if (outfile != stdout)
@@ -116,6 +138,3 @@ int main(int argc, char *argv[])
   
   return 0;
 }
-
-
-
